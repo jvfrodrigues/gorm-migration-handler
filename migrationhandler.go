@@ -17,6 +17,10 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+type templateStruct struct {
+	MigrationSQL string
+}
+
 const migrationTemplate string = `-- Write your SQL command here
 {{.MigrationSQL}}`
 
@@ -24,45 +28,47 @@ type database struct {
 	Db *gorm.DB
 }
 
-// DBConfig gets the gorm dialector to connection to the database and the models in it
+// DBConfig gets the gorm dialector to connect to the database, the models in the project and your migrations folder path
 type DBConfig struct {
-	Dialector gorm.Dialector
-	Models    []interface{}
+	Dialector            gorm.Dialector
+	Models               []interface{}
+	MigrationsFolderPath string
 }
 
-// Migration gets name of the migration and the path to the migrations folder on the project
-type Migration struct {
-	FolderPath   string
-	Name         string
+type migration struct {
 	id           string
+	name         string
 	migrationSQL string
 	rollbackSQL  string
 }
 
-// CreateMigration receives the database and migration information and creates the requested migration
-func CreateMigration(database DBConfig, migration Migration) error {
-	migration.id = fmt.Sprint(time.Now().Unix())
-	db, err := newDatabase(database)
+// CreateMigration requires the dbConfig and your migration folder path and the name of the migration you want to create
+func CreateMigration(databaseConfig DBConfig, migrationName string) error {
+	newMigration := migration{
+		id:   fmt.Sprint(time.Now().Unix()),
+		name: migrationName,
+	}
+	db, err := newDatabase(databaseConfig)
 	if err != nil {
 		fmt.Println("Database connection failed skipping auto migration")
 	} else {
-		migrationSQL := getChangesAuto(db, database.Models)
+		migrationSQL := getChangesAuto(db, databaseConfig.Models)
 		if migrationSQL == "" {
 			fmt.Println("No auto changes found.")
 		}
-		migration.migrationSQL = migrationSQL
+		newMigration.migrationSQL = migrationSQL
 	}
-	err = generateMigrationFile(migration)
+	err = generateFiles(newMigration, databaseConfig.MigrationsFolderPath)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Migration '%s' created successfully.\n", migration.Name)
+	fmt.Printf("Migration '%s' created successfully.\n", newMigration.name)
 	return nil
 }
 
 // RunMigrations gets DB info and gets all migrations from given folder to run on the database
-func RunMigrations(connection DBConfig, migrationFolderPath string) error {
-	manager, err := setupManager(connection, migrationFolderPath)
+func RunMigrations(dbConfig DBConfig) error {
+	manager, err := setupManager(dbConfig)
 	if err != nil {
 		return err
 	}
@@ -75,8 +81,8 @@ func RunMigrations(connection DBConfig, migrationFolderPath string) error {
 }
 
 // RollbackMigration gets DB info and gets migration folder to find and rollback the latest migration
-func RollbackMigration(connection DBConfig, migrationFolderPath string) error {
-	manager, err := setupManager(connection, migrationFolderPath)
+func RollbackMigration(dbConfig DBConfig) error {
+	manager, err := setupManager(dbConfig)
 	if err != nil {
 		return err
 	}
@@ -88,12 +94,12 @@ func RollbackMigration(connection DBConfig, migrationFolderPath string) error {
 	return nil
 }
 
-func setupManager(connection DBConfig, path string) (*gormigrate.Gormigrate, error) {
-	db, err := newDatabase(connection)
+func setupManager(dbConfig DBConfig) (*gormigrate.Gormigrate, error) {
+	db, err := newDatabase(dbConfig)
 	if err != nil {
 		return nil, errors.New("connection to database failed, can not run migrations")
 	}
-	migrations, err := getMigrations(path)
+	migrations, err := getMigrations(dbConfig.MigrationsFolderPath)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +114,7 @@ func setupManager(connection DBConfig, path string) (*gormigrate.Gormigrate, err
 	return gm, nil
 }
 
-func setupMigration(migration Migration) *gormigrate.Migration {
+func setupMigration(migration migration) *gormigrate.Migration {
 	return &gormigrate.Migration{
 		ID: migration.id,
 		Migrate: func(db *gorm.DB) error {
@@ -132,8 +138,8 @@ func setupMigration(migration Migration) *gormigrate.Migration {
 	}
 }
 
-func getMigrations(path string) (map[string]Migration, error) {
-	migrations := make(map[string]Migration)
+func getMigrations(path string) (map[string]migration, error) {
+	migrations := make(map[string]migration)
 	migrationsFilter, err := regexp.Compile(`^\d+.*_up.sql$`)
 	if err != nil {
 		return nil, err
@@ -144,37 +150,39 @@ func getMigrations(path string) (map[string]Migration, error) {
 	}
 	files, err := os.ReadDir(path)
 	if err != nil {
-		fmt.Println("Error reading folder:", err)
 		return nil, err
 	}
 	for _, file := range files {
-		var migration Migration
+		var foundMigration migration
 		if file.IsDir() {
 			continue
 		}
-		migrationID := strings.Split(file.Name(), "_")[0]
-		filePath := path + "/" + file.Name()
+		fileName := file.Name()
+		filePath := path + "/" + fileName
 		content, err := os.ReadFile(filePath)
 		if err != nil {
-			fmt.Printf("Error reading file %s: %v\n", file.Name(), err)
+			fmt.Printf("Error reading file %s: %v\n", fileName, err)
 			continue
 		}
-		migration = migrations[migrationID]
-		migration.id = migrationID
-		if migrationsFilter.MatchString(file.Name()) {
-			migration.migrationSQL = string(content)
-		} else if rollbackFilter.MatchString(file.Name()) {
-			migration.rollbackSQL = string(content)
+		splitName := strings.Split(file.Name(), "_")
+		migrationID := splitName[0]
+		migrationName := strings.Join(splitName[:2], "_")
+		foundMigration = migrations[migrationName]
+		foundMigration.id = migrationID
+		if migrationsFilter.MatchString(fileName) {
+			foundMigration.migrationSQL = string(content)
+		} else if rollbackFilter.MatchString(fileName) {
+			foundMigration.rollbackSQL = string(content)
 		} else {
 			continue
 		}
-		migrations[migrationID] = migration
+		migrations[migrationName] = foundMigration
 	}
 	return migrations, nil
 }
 
-func newDatabase(connection DBConfig) (*database, error) {
-	db, err := gorm.Open(connection.Dialector, &gorm.Config{
+func newDatabase(dbConfig DBConfig) (*database, error) {
+	db, err := gorm.Open(dbConfig.Dialector, &gorm.Config{
 		SkipDefaultTransaction: true,
 		Logger:                 logger.Default.LogMode(logger.Silent),
 	})
@@ -192,10 +200,7 @@ func getChangesAuto(db *database, models []interface{}) string {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 	_ = db.Db.Session(&gorm.Session{DryRun: true}).AutoMigrate(models...)
-	err := w.Close()
-	if err != nil {
-		fmt.Println("Error:", err)
-	}
+	_ = w.Close()
 	os.Stdout = originalOut
 	scanner := bufio.NewScanner(r)
 	lines := ""
@@ -205,21 +210,17 @@ func getChangesAuto(db *database, models []interface{}) string {
 			lines += text + "\n"
 		}
 	}
-	err = r.Close()
-	if err != nil {
-		fmt.Println("Error:", err)
-	}
+	_ = r.Close()
 	return lines
 }
 
-func generateMigrationFile(migration Migration) error {
-	_, err := os.ReadDir(migration.FolderPath)
+func generateFiles(migration migration, folderPath string) error {
+	_, err := os.ReadDir(folderPath)
 	if err != nil {
-		return fmt.Errorf("could not find dir %s", migration.FolderPath)
+		return fmt.Errorf("could not find dir %s", folderPath)
 	}
-	migrationFileName := fmt.Sprintf("%s/%s_%s_up.sql", migration.FolderPath, migration.id, migration.Name)
-	rollbackFileName := fmt.Sprintf("%s/%s_%s_down.sql", migration.FolderPath, migration.id, migration.Name)
-	// Create files
+	migrationFileName := fmt.Sprintf("%s/%s_%s_up.sql", folderPath, migration.id, migration.name)
+	rollbackFileName := fmt.Sprintf("%s/%s_%s_down.sql", folderPath, migration.id, migration.name)
 	migrationFile, err := os.Create(migrationFileName)
 	if err != nil {
 		return err
@@ -237,20 +238,14 @@ func generateMigrationFile(migration Migration) error {
 	if err != nil {
 		return err
 	}
-	data := struct {
-		MigrationSQL string
-	}{
+	data := &templateStruct{
 		MigrationSQL: migration.migrationSQL,
 	}
 	err = tmpl.Execute(migrationFile, data)
 	if err != nil {
 		return err
 	}
-	data = struct {
-		MigrationSQL string
-	}{
-		MigrationSQL: migration.rollbackSQL,
-	}
+	data.MigrationSQL = migration.rollbackSQL
 	err = tmpl.Execute(rollbackFile, data)
 	if err != nil {
 		return err

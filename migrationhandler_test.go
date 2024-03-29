@@ -36,24 +36,18 @@ func TestCreateMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("test error: %v", err)
 	}
-	testMigration := migrationhandler.Migration{
-		FolderPath: "./" + dir,
-		Name:       "test",
-	}
 	tests := []struct {
 		name                   string
 		dbConfig               migrationhandler.DBConfig
-		migration              migrationhandler.Migration
 		expectedMigrationLines int
 		expectedError          error
 	}{
 		{
 			name: "Test if no models available, empty migration files are created",
 			dbConfig: migrationhandler.DBConfig{
-				Dialector: dialector,
-				Models:    []interface{}{},
+				Dialector:            dialector,
+				MigrationsFolderPath: "./" + dir,
 			},
-			migration:              testMigration,
 			expectedMigrationLines: 0,
 			expectedError:          nil,
 		},
@@ -70,19 +64,16 @@ func TestCreateMigration(t *testing.T) {
 						Age:  30,
 					},
 				},
+				MigrationsFolderPath: "./" + dir,
 			},
-			migration:              testMigration,
 			expectedMigrationLines: 1,
 			expectedError:          nil,
 		},
 		{
 			name: "Test if it errors on non existing folder",
 			dbConfig: migrationhandler.DBConfig{
-				Dialector: dialector,
-			},
-			migration: migrationhandler.Migration{
-				FolderPath: "./non-existing-dir",
-				Name:       "test",
+				Dialector:            dialector,
+				MigrationsFolderPath: "./non-existing-dir",
 			},
 			expectedMigrationLines: 0,
 			expectedError:          fmt.Errorf("could not find dir ./non-existing-dir"),
@@ -94,22 +85,22 @@ func TestCreateMigration(t *testing.T) {
 					DriverName: "my_mysql_driver",
 					DSN:        "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=Local", // data source name, refer https://github.com/go-sql-driver/mysql#dsn-data-source-name
 				}),
+				MigrationsFolderPath: "./" + dir,
 			},
-			migration:              testMigration,
 			expectedMigrationLines: 0,
 			expectedError:          nil,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := migrationhandler.CreateMigration(tc.dbConfig, tc.migration)
+			err := migrationhandler.CreateMigration(tc.dbConfig, "test")
 			if err != nil && tc.expectedError != nil {
 				if err.Error() != tc.expectedError.Error() {
 					t.Errorf("expected: %+v, got: %+v", tc.expectedError, err)
 				}
 				return
 			}
-			dirFiles, err := os.ReadDir(tc.migration.FolderPath)
+			dirFiles, err := os.ReadDir(tc.dbConfig.MigrationsFolderPath)
 			if err != nil {
 				t.Fatalf("test error: %v", err)
 			}
@@ -121,7 +112,7 @@ func TestCreateMigration(t *testing.T) {
 				if entry.IsDir() || !migrationsFilter.MatchString(entry.Name()) {
 					continue
 				}
-				migration, err = os.ReadFile(tc.migration.FolderPath + "/" + entry.Name())
+				migration, err = os.ReadFile(tc.dbConfig.MigrationsFolderPath + "/" + entry.Name())
 				if err != nil {
 					t.Fatalf("test error: %v", err)
 				}
@@ -136,81 +127,96 @@ func TestCreateMigration(t *testing.T) {
 	}
 }
 
+func onEachRunMigrations(t *testing.T, dbConfig migrationhandler.DBConfig, migrationsToRun int) {
+	for i := 0; i < migrationsToRun; i++ {
+		err := migrationhandler.CreateMigration(dbConfig, fmt.Sprintf("test%v", i))
+		if err != nil {
+			t.Fatalf("test error: %v", err)
+		}
+	}
+}
+
 func TestRunMigrations(t *testing.T) {
 	dialector := sqlite.Open("file::memory:?cache=shared")
+	db, err := gorm.Open(dialector, &gorm.Config{
+		SkipDefaultTransaction: true,
+		Logger:                 logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("test error: %v", err)
+	}
 	tests := []struct {
-		name                string
-		dbConfig            migrationhandler.DBConfig
-		migrationsToRun     []migrationhandler.Migration
-		migrationFolderName string
-		expectedError       error
+		name            string
+		dbConfig        migrationhandler.DBConfig
+		migrationsToRun int
+		expectedError   error
 	}{
 		{
-			name:     "Test if migrations run successfully",
-			dbConfig: migrationhandler.DBConfig{Dialector: dialector},
-			migrationsToRun: []migrationhandler.Migration{
-				{
-					Name: "test",
-				},
+			name: "Test if migrations run successfully",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: "./" + tempDir(t),
 			},
-			migrationFolderName: tempDir(t),
-			expectedError:       nil,
+			migrationsToRun: 1,
+			expectedError:   nil,
 		},
 		{
 			name: "Test if it errors on no connection to database",
 			dbConfig: migrationhandler.DBConfig{Dialector: mysql.New(mysql.Config{
 				DriverName: "my_mysql_driver",
 				DSN:        "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=Local", // data source name, refer https://github.com/go-sql-driver/mysql#dsn-data-source-name
-			})},
-			migrationsToRun:     []migrationhandler.Migration{},
-			migrationFolderName: tempDir(t),
-			expectedError:       errors.New("connection to database failed, can not run migrations"),
+			}),
+				MigrationsFolderPath: "./" + tempDir(t),
+			},
+			migrationsToRun: 0,
+			expectedError:   errors.New("connection to database failed, can not run migrations"),
 		},
 		{
-			name:                "Test if it errors on non existing migration folder",
-			dbConfig:            migrationhandler.DBConfig{Dialector: dialector},
-			migrationsToRun:     []migrationhandler.Migration{},
-			migrationFolderName: "non-existing-folder",
-			expectedError:       errors.New("open ./non-existing-folder: no such file or directory"),
+			name: "Test if it errors on non existing migration folder",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: "./non-existing-folder",
+			},
+			migrationsToRun: 0,
+			expectedError:   errors.New("open ./non-existing-folder: no such file or directory"),
 		},
 		{
-			name:                "Test if it errors on no migrations to run",
-			dbConfig:            migrationhandler.DBConfig{Dialector: dialector},
-			migrationsToRun:     []migrationhandler.Migration{},
-			migrationFolderName: tempDir(t),
-			expectedError:       errors.New("no migrations to run"),
+			name: "Test if it errors on no migrations to run",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: "./" + tempDir(t),
+			},
+			migrationsToRun: 0,
+			expectedError:   errors.New("no migrations to run"),
+		},
+		{
+			name: "Test if it errors if there is more than one migration with the same ID",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: "./" + tempDir(t),
+			},
+			migrationsToRun: 2,
+			expectedError:   errors.New("gormigrate: Duplicated migration ID"),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
-				_ = os.RemoveAll(tc.migrationFolderName)
+				db.Exec("DROP TABLE 'migrations'")
+				_ = os.RemoveAll(tc.dbConfig.MigrationsFolderPath)
 			}()
-			for _, migration := range tc.migrationsToRun {
-				migration.FolderPath = "./" + tc.migrationFolderName
-				err := migrationhandler.CreateMigration(tc.dbConfig, migration)
-				if err != nil {
-					t.Fatalf("test error: %v", err)
-				}
-			}
-			err := migrationhandler.RunMigrations(tc.dbConfig, "./"+tc.migrationFolderName)
+			onEachRunMigrations(t, tc.dbConfig, tc.migrationsToRun)
+			err := migrationhandler.RunMigrations(tc.dbConfig)
 			if err != nil && tc.expectedError != nil {
-				if err.Error() != tc.expectedError.Error() {
+				if !strings.Contains(err.Error(), tc.expectedError.Error()) {
 					t.Errorf("expected: %+v, got: %+v", tc.expectedError, err)
 				}
 				return
 			}
-			db, err := gorm.Open(tc.dbConfig.Dialector, &gorm.Config{
-				SkipDefaultTransaction: true,
-				Logger:                 logger.Default.LogMode(logger.Silent),
-			})
-			if err != nil {
-				t.Fatalf("test error: %v", err)
-			}
 			var count int64
 			db.Table("migrations").Count(&count)
-			if count != int64(len(tc.migrationsToRun)) {
-				t.Errorf("expected: %+v, got: %+v", len(tc.migrationsToRun), count)
+			if count != int64(tc.migrationsToRun) {
+				t.Errorf("expected: %+v, got: %+v", tc.migrationsToRun, count)
 			}
 		})
 	}
@@ -218,18 +224,18 @@ func TestRunMigrations(t *testing.T) {
 
 func beforeEachRollback(t *testing.T, dialector gorm.Dialector) string {
 	dir := tempDir(t)
-	dbconfig := migrationhandler.DBConfig{Dialector: dialector}
+	dbconfig := migrationhandler.DBConfig{
+		Dialector:            dialector,
+		MigrationsFolderPath: "./" + dir,
+	}
 	err := migrationhandler.CreateMigration(
 		dbconfig,
-		migrationhandler.Migration{
-			Name:       "test",
-			FolderPath: "./" + dir,
-		},
+		"test",
 	)
 	if err != nil {
 		t.Fatalf("test error: %v", err)
 	}
-	err = migrationhandler.RunMigrations(dbconfig, "./"+dir)
+	err = migrationhandler.RunMigrations(dbconfig)
 	if err != nil {
 		t.Fatalf("test error: %v", err)
 	}
@@ -238,58 +244,64 @@ func beforeEachRollback(t *testing.T, dialector gorm.Dialector) string {
 
 func TestRollbackMigrations(t *testing.T) {
 	dialector := sqlite.Open("file::memory:?cache=shared")
+	db, err := gorm.Open(dialector, &gorm.Config{
+		SkipDefaultTransaction: true,
+		Logger:                 logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		t.Fatalf("test error: %v", err)
+	}
 	tests := []struct {
-		name                string
-		dbConfig            migrationhandler.DBConfig
-		migrationFolderName string
-		expectedError       error
+		name          string
+		dbConfig      migrationhandler.DBConfig
+		expectedError error
 	}{
 		{
-			name:                "Test if migrations rollback successfully",
-			dbConfig:            migrationhandler.DBConfig{Dialector: dialector},
-			migrationFolderName: beforeEachRollback(t, dialector),
-			expectedError:       nil,
+			name: "Test if migrations rollback successfully",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: beforeEachRollback(t, dialector),
+			},
+			expectedError: nil,
 		},
 		{
 			name: "Test if it errors on no connection to database",
 			dbConfig: migrationhandler.DBConfig{Dialector: mysql.New(mysql.Config{
 				DriverName: "my_mysql_driver",
 				DSN:        "gorm:gorm@tcp(localhost:9910)/gorm?charset=utf8&parseTime=True&loc=Local", // data source name, refer https://github.com/go-sql-driver/mysql#dsn-data-source-name
-			})},
-			migrationFolderName: beforeEachRollback(t, dialector),
-			expectedError:       errors.New("connection to database failed, can not run migrations"),
+			}),
+				MigrationsFolderPath: beforeEachRollback(t, dialector),
+			},
+			expectedError: errors.New("connection to database failed, can not run migrations"),
 		},
 		{
-			name:                "Test if it errors on non existing migration folder",
-			dbConfig:            migrationhandler.DBConfig{Dialector: dialector},
-			migrationFolderName: "non-existing-folder",
-			expectedError:       errors.New("open ./non-existing-folder: no such file or directory"),
+			name: "Test if it errors on non existing migration folder",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: "./non-existing-folder",
+			},
+			expectedError: errors.New("open ./non-existing-folder: no such file or directory"),
 		},
 		{
-			name:                "Test if it errors on no migrations to rollback",
-			dbConfig:            migrationhandler.DBConfig{Dialector: dialector},
-			migrationFolderName: beforeEachRollback(t, dialector),
-			expectedError:       errors.New("gormigrate: Could not find last run migration"),
+			name: "Test if it errors on no migrations to rollback",
+			dbConfig: migrationhandler.DBConfig{
+				Dialector:            dialector,
+				MigrationsFolderPath: beforeEachRollback(t, dialector),
+			},
+			expectedError: errors.New("gormigrate: Could not find last run migration"),
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
-				_ = os.RemoveAll(tc.migrationFolderName)
+				_ = os.RemoveAll(tc.dbConfig.MigrationsFolderPath)
 			}()
-			err := migrationhandler.RollbackMigration(tc.dbConfig, "./"+tc.migrationFolderName)
+			err := migrationhandler.RollbackMigration(tc.dbConfig)
 			if err != nil && tc.expectedError != nil {
 				if err.Error() != tc.expectedError.Error() {
 					t.Errorf("expected: %+v, got: %+v", tc.expectedError, err)
 				}
 				return
-			}
-			db, err := gorm.Open(tc.dbConfig.Dialector, &gorm.Config{
-				SkipDefaultTransaction: true,
-				Logger:                 logger.Default.LogMode(logger.Silent),
-			})
-			if err != nil {
-				t.Fatalf("test error: %v", err)
 			}
 			var count int64
 			db.Table("migrations").Count(&count)
